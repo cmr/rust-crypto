@@ -195,7 +195,7 @@ impl ChaCha20 {
 
         // Apply r/2 iterations of the same "double-round" function,
         // obtaining (z0, z1, ... z15) = doubleround r/2 (x0, x1, ... x15).
-        for _ in (0..self.rounds as i8 / 2) {
+        for _ in 0..self.rounds as i8 / 2 {
             round!(state);
             let u32x4(b10, b11, b12, b13) = state.b;
             state.b = u32x4(b11, b12, b13, b10);
@@ -230,7 +230,7 @@ impl ChaCha20 {
     fn update(&mut self) {
         let mut state = self.state;
 
-        for _ in (0..self.rounds as i8 / 2) {
+        for _ in 0..self.rounds as i8 / 2 {
             round!(state);
             swizzle!(state.b, state.c, state.d);
             round!(state);
