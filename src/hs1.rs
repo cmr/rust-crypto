@@ -89,6 +89,13 @@ impl PartialEq for Key {
     }
 }
 
+/// Take a subslice of `v` starting at `start` and containing `len` elements.
+///
+/// This corresponds to the `v[start, len]` notation used throughout the paper.
+fn subsl<'a, T>(v: &'a [T], start: usize, len: usize) -> &'a [T] {
+    &v[start .. start + len]
+}
+
 pub type Ciphertext = Vec<u8>;
 pub type Authenticator = Vec<u8>;
 pub type Plaintext = Vec<u8>;
@@ -400,19 +407,11 @@ impl PRF for HS1 {
         let mut key: Vec<u8> = repeat(0).take(y as usize).collect();
         let mut Y: Vec<u8> = repeat(0).take(y as usize).collect();
 
-        // XXX_QUESTION: There probably a typo here at kA[3i, 3], since, when i == i, then the
-        // subarray will be empty.  Perhaps we're supposed to do kA[3i, 3i+3]?
-
-        // XXX_QUESTION: When i >= 5, we don't take anything from kN, because len(kN) == 36 and
-        // (b/4) == 16.  Maybe it's supposed to be kN[4i, (b/4)+4(t-1)]?
-
         // 1. `A_i = HS1-Hash[b,t](kN[4i, b/4], kP[i], kA[3i, 3], M) for each 0 ≤ i < t`
         for i in 0..self.parameters.t {
-            let n: Vec<u32> = k.N[i as usize * 4..(self.parameters.b as usize / 4) +
-                                                  (4 * (self.parameters.t as usize - 1))]
-                .to_vec();
+            let n: Vec<u32> = subsl(&*k.N, i as usize * 4, self.parameters.b as usize / 4).to_vec();
             let p: u64 = k.P[i as usize];
-            let a: Vec<u64> = k.A[i as usize * 3..(i as usize * 3 + 3)].to_vec();
+            let a: Vec<u64> = subsl(&*k.A, i as usize * 3, 3).to_vec();
 
             // Concatenate A_i (either 4 or 8 bytes) into the hashed input for combination with the
             // keystream:
