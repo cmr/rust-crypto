@@ -308,7 +308,7 @@ impl Subkeygen for HS1 {
         let asuLen: usize = 24 * self.parameters.t as usize;
         let y: usize = chachaLen + nhLen + polyLen + asuLen;
         let mut chacha: ChaCha20;
-        let mut kPrime: [u8; 32];
+        let kPrime: [u8; 32];
         let mut N: Vec<u8>;
         let mut input: Vec<u8> = repeat(0).take(y).collect();
         let mut output: Vec<u8> = repeat(0).take(y).collect();
