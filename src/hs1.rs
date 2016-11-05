@@ -24,7 +24,6 @@
 #![allow(non_snake_case)]
 
 use std;
-use std::collections::BitVec;
 use std::iter::repeat;
 use std::result::Result;
 use std::slice::Chunks;
@@ -37,6 +36,8 @@ use chacha20::ChaCha20;
 use cryptoutil::xor_keystream;
 use symmetriccipher::SynchronousStreamCipher; // Used in order to call ChaCha20::process().
 
+extern crate bit_vec;
+use self::bit_vec::BitVec;
 
 macro_rules! u64toBI {
     ($x:expr) => (BigInt::from_u64($x).expect(&format!("Couldn't convert {:?} into BigInt", $x)[..]))
@@ -695,15 +696,17 @@ fn pad(multiple: usize, input: &Vec<u8>) -> Vec<u8> {
 pub fn toStr<'a>(n: isize, x: &'a usize) -> Vec<u8> {
     let binary:       String  = format!("{:b}", x.to_le());
     let len:          isize = n * 8isize - binary.len() as isize;
-    let mut bits:    BitVec = BitVec::from_fn(binary.len(), |i| { binary.char_at(i) == '1' });
+    let bits = (0 .. binary.len()).map(|i| { binary.chars().nth(i).unwrap() == '1' });
     let mut padding: BitVec;
 
     if len > 0 {
         padding = BitVec::from_elem(len as usize, false);
-        padding.append(&mut bits);
+        padding.extend(bits);
         return padding.to_bytes();
     } else {
-        return bits.to_bytes();
+        let mut v = BitVec::with_capacity(binary.len());
+        v.extend(bits);
+        return v.to_bytes();
     }
 }
 
