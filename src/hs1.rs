@@ -199,13 +199,13 @@ pub trait Subkeygen {
 /// Hash `M` a total of `t` times with different keys and combine the result with the stream
 /// cipher’s key.
 pub trait PRF {
-    fn prf(&self, k: &Key, M: &Vec<u8>, N: &Vec<u8>, y: i64) -> Vec<u8>;
+    fn prf(&self, k: &Key, M: &[u8], N: &[u8], y: i64) -> Vec<u8>;
 }
 
 /// The hash family HS1-Hash is `(1/2^(28) + l/b2^(60))-AU` for all `M` up to `l` bytes, when
 /// `k_N` and `k_P` are chosen randomly and `t ≤ 4`.
 pub trait Hash {
-    fn hash(&self, kN: &Vec<u32>, kP: &u64, kA: &Vec<u64>, M: &Vec<u8>) -> Vec<u8>;
+    fn hash(&self, kN: &[u32], kP: &u64, kA: &[u64], M: &[u8]) -> Vec<u8>;
 }
 
 /// Encrypt the message `M` using the HS1-SIV authenticated encryption cipher.
@@ -214,7 +214,7 @@ pub trait Encrypt {
                K: &[u8],
                M: &Plaintext,
                A: &AssociatedData,
-               N: &Vec<u8>)
+               N: &[u8])
                -> (Ciphertext, Authenticator);
 }
 
@@ -225,7 +225,7 @@ pub trait Decrypt {
                T: &Authenticator,
                C: &Ciphertext,
                A: &AssociatedData,
-               N: &Vec<u8>)
+               N: &[u8])
                -> Result<Plaintext, Error>;
 }
 
@@ -340,13 +340,13 @@ impl Subkeygen for HS1 {
         // XXX Ugh… the .. syntax all over the place in this section is horribly unreadable.
         Key {
             S: take32(&output[..chachaLen]),
-            N: toInts4(&output[chachaLen..][..nhLen].to_vec()).unwrap(),
-            P: toInts8(&output[chachaLen + nhLen..][..polyLen].to_vec())
+            N: toInts4(&output[chachaLen..][..nhLen]).unwrap(),
+            P: toInts8(&output[chachaLen + nhLen..][..polyLen])
                 .unwrap()
                 .iter()
                 .map(|x| *x % 2u64.pow(60))
                 .collect(),
-            A: toInts8(&output[chachaLen + nhLen + polyLen..][..asuLen].to_vec()).unwrap(),
+            A: toInts8(&output[chachaLen + nhLen + polyLen..][..asuLen]).unwrap(),
         }
     }
 }
@@ -397,7 +397,7 @@ impl Subkeygen for HS1 {
 ///                 092, 230, 175, 079, 064, 119, 249, 143])
 /// ```
 impl PRF for HS1 {
-    fn prf(&self, k: &Key, M: &Vec<u8>, N: &Vec<u8>, y: i64) -> Vec<u8> {
+    fn prf(&self, k: &Key, M: &[u8], N: &[u8], y: i64) -> Vec<u8> {
         assert_eq!(k.S.len(), 32);
         assert_eq!(N.len(), 12);
         assert!(0i64 < y);
@@ -409,9 +409,9 @@ impl PRF for HS1 {
 
         // 1. `A_i = HS1-Hash[b,t](kN[4i, b/4], kP[i], kA[3i, 3], M) for each 0 ≤ i < t`
         for i in 0..self.parameters.t {
-            let n: Vec<u32> = subsl(&*k.N, i as usize * 4, self.parameters.b as usize / 4).to_vec();
+            let n: &[u32] = subsl(&*k.N, i as usize * 4, self.parameters.b as usize / 4);
             let p: u64 = k.P[i as usize];
-            let a: Vec<u64> = subsl(&*k.A, i as usize * 3, 3).to_vec();
+            let a: &[u64] = subsl(&*k.A, i as usize * 3, 3);
 
             // Concatenate A_i (either 4 or 8 bytes) into the hashed input for combination with the
             // keystream:
@@ -432,7 +432,7 @@ impl PRF for HS1 {
         // 2. `Y   = ChaCha[r](pad(32, A_0 || A_1 || … || A_(t-1)) ⊕ kS), 0, N, 0^y)`
         xor_keystream(&mut key, &pad(32, &A), &k.S[..]);
         ChaCha20::new(&k.S, &N[..], Some(self.parameters.r as i8)).process(&key[..], &mut Y[..]);
-        Y.to_vec()
+        Y
     }
 }
 
@@ -479,7 +479,7 @@ impl PRF for HS1 {
 /// 6. if (t ≤ 4) Y = toStr(8, h)
 /// 7. else Y = toStr(4, (kA[0] + kA[1] × (h mod 2^32) + kA[2] × (h div 2 ^32)) div 2^32)
 impl Hash for HS1 {
-    fn hash(&self, kN: &Vec<u32>, kP: &u64, kA: &Vec<u64>, M: &Vec<u8>) -> Vec<u8> {
+    fn hash(&self, kN: &[u32], kP: &u64, kA: &[u64], M: &[u8]) -> Vec<u8> {
         let n: u32;
         let Mi: Chunks<u8>;
         let mut Y: Vec<u8>;
@@ -495,7 +495,7 @@ impl Hash for HS1 {
 
         // 3. m_i = toInts(4, pad(16, M_i)) for each 1 ≤ i ≤ n.
         for (_, chunk) in Mi.enumerate() {
-            let mi: Vec<u32> = toInts4(&pad(16, &chunk.to_vec())).unwrap();
+            let mi: Vec<u32> = toInts4(&pad(16, &chunk)).unwrap();
             // 4. a_i = NH(kN, m_i) mod 2^60 + (|M_i| mod 16) for each 1 ≤ i ≤ n.
             a.push(NH(kN, &mi) + BigInt::from_u8(self.parameters.b % 16u8).unwrap());
         }
@@ -551,7 +551,7 @@ impl Encrypt for HS1 {
                K: &[u8],
                M: &Plaintext,
                A: &AssociatedData,
-               N: &Vec<u8>)
+               N: &[u8])
                -> (Ciphertext, Authenticator) {
         assert!(N.len() == 12);
 
@@ -617,7 +617,7 @@ impl Decrypt for HS1 {
                T: &Authenticator,
                C: &Ciphertext,
                A: &AssociatedData,
-               N: &Vec<u8>)
+               N: &[u8])
                -> Result<Plaintext, Error> {
         assert!(T.len() == self.parameters.l as usize);
         assert!(N.len() == 12);
@@ -677,7 +677,7 @@ impl Decrypt for HS1 {
 ///
 /// assert_eq!(NH(&v1, &v2).to_u64().unwrap(), 162501409595406698u64);
 /// ```
-pub fn NH(v1: &Vec<u32>, v2: &Vec<u32>) -> BigInt {
+pub fn NH(v1: &[u32], v2: &[u32]) -> BigInt {
     let mut sum: BigInt = BigInt::from_usize(0).unwrap();
     let m: BigInt = BigInt::from_u64(2u64.pow(60)).unwrap();
     let bn1: Vec<BigInt> = v1.iter().map(|x| x.to_bigint().unwrap()).collect();
@@ -721,8 +721,8 @@ pub enum ConversionError {
 ///
 /// assert_eq!(padded, [0x41, 0x42, 0x43, 0x00, 0x00]);
 /// ```
-fn pad(multiple: usize, input: &Vec<u8>) -> Vec<u8> {
-    let mut padded: Vec<u8> = input.clone();
+fn pad(multiple: usize, input: &[u8]) -> Vec<u8> {
+    let mut padded: Vec<u8> = input.to_vec();
 
     while (padded.len() % multiple) > 0 {
         padded.push(0x00);
@@ -782,7 +782,7 @@ pub fn toStr<'a>(n: isize, x: &'a usize) -> Vec<u8> {
 /// let yet_another: Vec<u32> = toInts4(&vec![255, 255, 255, 255]).unwrap();
 /// assert!(yet_another[0] == 4294967295u32);
 /// ```
-pub fn toInts4(S: &Vec<u8>) -> Result<Vec<u32>, ConversionError> {
+pub fn toInts4(S: &[u8]) -> Result<Vec<u32>, ConversionError> {
     if S.len() % 4 != 0 {
         println!("The length of S in bytes must be some multiple of 4.");
         return Err(ConversionError::StrToInt);
@@ -819,7 +819,7 @@ pub fn toInts4(S: &Vec<u8>) -> Result<Vec<u32>, ConversionError> {
 /// let yet_another: Vec<u64> = toInts8(&vec![255, 255, 255, 255, 255, 255, 255, 255]).unwrap();
 /// assert!(yet_another[0] == 18446744073709551615u64);
 /// ```
-pub fn toInts8(S: &Vec<u8>) -> Result<Vec<u64>, ConversionError> {
+pub fn toInts8(S: &[u8]) -> Result<Vec<u64>, ConversionError> {
     if S.len() % 8 != 0 {
         println!("The length of S in bytes must be some multiple of 8.");
         return Err(ConversionError::StrToInt);
