@@ -28,20 +28,16 @@ use std::iter::repeat;
 use std::result::Result;
 use std::slice::Chunks;
 use std::vec::Vec;
-
-pub use num::bigint::{BigInt, ToBigInt};
-pub use num::traits::{FromPrimitive, ToPrimitive};
+use std::num::Wrapping;
 
 use chacha20::ChaCha20;
 use cryptoutil::xor_keystream;
 use symmetriccipher::SynchronousStreamCipher; // Used in order to call ChaCha20::process().
 
 extern crate bit_vec;
+extern crate extprim;
 use self::bit_vec::BitVec;
-
-macro_rules! u64toBI {
-    ($x:expr) => (BigInt::from_u64($x).expect(&format!("Couldn't convert {:?} into BigInt", $x)[..]))
-}
+use self::extprim::u128::u128;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Error {
@@ -327,11 +323,11 @@ impl Subkeygen for HS1 {
         assert_eq!(kPrime.len(), 32);
 
         N = toStr(12,
-                  &((self.parameters.b as u64 * 2u64.pow(48) +
-                     self.parameters.t as u64 * 2u64.pow(40) +
-                     self.parameters.r as u64 * 2u64.pow(32) +
-                     self.parameters.l as u64 * 2u64.pow(16) +
-                     K.len() as u64) as usize));
+                  ((self.parameters.b as u64 * 2u64.pow(48) +
+                    self.parameters.t as u64 * 2u64.pow(40) +
+                    self.parameters.r as u64 * 2u64.pow(32) +
+                    self.parameters.l as u64 * 2u64.pow(16) +
+                    K.len() as u64) as usize));
         N.truncate(12);
 
         chacha = ChaCha20::new(&kPrime, &N[..], Some(self.parameters.r as i8));
@@ -480,12 +476,34 @@ impl PRF for HS1 {
 /// 7. else Y = toStr(4, (kA[0] + kA[1] × (h mod 2^32) + kA[2] × (h div 2 ^32)) div 2^32)
 impl Hash for HS1 {
     fn hash(&self, kN: &[u32], kP: &u64, kA: &[u64], M: &[u8]) -> Vec<u8> {
+        const T61_1: u64 = (1 << 61) - 1;
+        const T60_1: u64 = (1 << 60) - 1;
         let n: u32;
         let Mi: Chunks<u8>;
         let mut Y: Vec<u8>;
-        let mut a: Vec<BigInt> = Vec::new();
-        let mut h: BigInt;
-        let mut m: BigInt; // m is set to one of two moduli, each reused rather than recomputed.
+        let mut h: u64 = 1;
+
+        fn mod60(a: u64) -> u64 {
+            (a >> 60) + (a & T60_1)
+        }
+
+        fn mod61(a: u64) -> u64 {
+            (a >> 61) + (a & T61_1)
+        }
+        
+        fn poly_step(a: u64, m: u64, k: u64) -> u64 {
+            let tmp = mod61((u128::new(a).wrapping_mul(u128::new(k))).low64());
+            tmp + m
+        }
+
+        fn poly_finalize(mut a: u64) -> u64 {
+            a = (a & T61_1) + (a >> 61);
+            if a == T61_1 {
+                0
+            } else {
+                a
+            }
+        }
 
         // 1. n = max(⌈|M|/b⌉, 1)
         n = std::cmp::max(M.len() as u32 / self.parameters.b as u32, 1);
@@ -493,32 +511,30 @@ impl Hash for HS1 {
         // 2. M_1 || M_2 || … || M_n = M and |M_i| = b for each 1 ≤ i ≤ n.
         Mi = M.chunks(self.parameters.b as usize);
 
+        debug_assert!(Mi.clone().count() == n as usize);
+
         // 3. m_i = toInts(4, pad(16, M_i)) for each 1 ≤ i ≤ n.
-        for (_, chunk) in Mi.enumerate() {
+        for (i, chunk) in Mi.enumerate() {
             let mi: Vec<u32> = toInts4(&pad(16, &chunk)).unwrap();
             // 4. a_i = NH(kN, m_i) mod 2^60 + (|M_i| mod 16) for each 1 ≤ i ≤ n.
-            a.push(NH(kN, &mi) + BigInt::from_u8(self.parameters.b % 16u8).unwrap());
+            let ai: u64 = NH(kN, &mi);// + ((self.parameters.b % 16u8) as u64);
+            // 5. h = kP^n + (a_1 × kP^(n-1)) + (a_2 × kP^(n-2)) + ... + (a_n × kP^0) mod (2^61 - 1)
+            // (computed via horner's method)
+            h = poly_step(h, mod60(ai), *kP);
         }
-        // 5. h = kP^n + (a_1 × kP^(n-1)) + (a_2 × kP^(n-2)) + ... + (a_n × kP^0) mod (2^61 - 1)
-        h = u64toBI!((*kP as u64).pow(n) % 2u64.pow(61) - 1);
-        m = u64toBI!(2u64.pow(61) - 1);
-        for (ai, j) in a.iter().zip(n as i32..0) {
-            h = h + (ai % m.clone()) * (u64toBI!(kP.pow(j as u32)) % m.clone()) % m.clone();
-        }
+        h = poly_finalize(h);
         // 6. if (t ≤ 4) Y = toStr(8, h)
         if self.parameters.t <= 4 {
-            Y = toStr(8, &(h.to_u64().unwrap() as usize));
+            Y = toStr(8, h as usize); // XXX cmr: I don't like the look of that 'as usize'
             Y.truncate(8);
         } else {
             // 7. else Y = toStr(4, (kA[0] + kA[1] × (h mod 2^32) + kA[2] × (h div 2 ^32)) div 2^32)
-            m = u64toBI!(2u64.pow(32));
-            Y = toStr(4,
-                      &(((u64toBI!(kA[0].clone()) +
-                          u64toBI!(kA[1].clone()) * (h.clone() % m.clone()) +
-                          u64toBI!(kA[2].clone()) * (h.clone() / m.clone())) /
-                         m.clone())
-                          .to_u64()
-                          .unwrap() as usize));
+            let m: u64 = 1 << 32;
+            let div: u64 = h / m;
+            let mod_: u64 = h % m;
+
+            let tmp = (kA[0].wrapping_add(kA[1].wrapping_mul(mod_)).wrapping_add(kA[2].wrapping_mul(div))) / m;
+            Y = toStr(4, tmp as usize); // XXX cmr: I don't like the look of that 'as usize'
             Y.truncate(4);
         }
         Y
@@ -561,7 +577,7 @@ impl Encrypt for HS1 {
         let C: Vec<u8>;
 
         k = self.subkeygen(&take32(K));
-        m = [pad(16, &A), pad(16, &M), toStr(8, &A.len()), toStr(8, &M.len())].concat();
+        m = [pad(16, &A), pad(16, &M), toStr(8, A.len()), toStr(8, M.len())].concat();
 
         // XXX_QUESTION: Here we are supposed to use `l` as the final parameter to prf(). However,
         // because y must equal 32 — as noted in a XXX_QUESTION above in prf() — we can only do this
@@ -638,7 +654,7 @@ impl Decrypt for HS1 {
                       &C,
                       &self.prf(&k, &T, N, (64 + C.len()) as i64)[64..C.len()]);
         M = out.to_vec();
-        m = [pad(16, &A), pad(16, &M), toStr(8, &A.len()), toStr(8, &M.len())].concat();
+        m = [pad(16, &A), pad(16, &M), toStr(8, A.len()), toStr(8, M.len())].concat();
         t = self.prf(&k, &m, N, self.parameters.l as i64);
 
         if *T == t {
@@ -649,18 +665,12 @@ impl Decrypt for HS1 {
     }
 }
 
-// XXX_QUESTION: We moved the `mod 2^60` from hash() to NH() for simplicity… should this be changed
-// in the spec?
-//
-// XXX_QUESTION: This is the only place in HS1-SIV which requires a bignum… everything else can get
-// away with utilising either u32 or u64.  Should/can this be restructured to avoid needing a bignum?
-//
 /// Given vectors of integers, `v1` and `v2`, returns the result of the following algorithm:
 ///
 /// ```text
-///                   n/4 ⎛                                           ⎞
-///     NH(v1, v2) =   Σ  ⎜(v1[4i-3]+v2[4i-3]) × (v1[4i-1]+v2[4i-1]) +⎟
-///                   i=1 ⎝(v1[4i-2]+v2[4i-2]) × (v1[4i]+v2[4i])      ⎠
+///                   n/4 ⎛                                                             ⎞
+///     NH(v1, v2) =   Σ  ⎜(v1[4i-3]+v2[4i-3] mod 2^32) × (v1[4i-1]+v2[4i-1] mod 2^32) +⎟ mod 2^64
+///                   i=1 ⎝(v1[4i-2]+v2[4i-2] mod 2^32) × (v1[4i  ]+v2[4i  ] mod 2^32)  ⎠
 /// ```
 /// where `n = min(v1.len(), v2.len())` and is alway a multiple of 4.
 ///
@@ -675,21 +685,24 @@ impl Decrypt for HS1 {
 /// let v2: Vec<u32> = vec![543516756,  2003792483, 1768711712, 1629516645,
 ///                        1768759412,  1734962788, 3044456,    0];
 ///
-/// assert_eq!(NH(&v1, &v2).to_u64().unwrap(), 162501409595406698u64);
+/// assert_eq!(NH(&v1, &v2), 162501409595406698u64);
 /// ```
-pub fn NH(v1: &[u32], v2: &[u32]) -> BigInt {
-    let mut sum: BigInt = BigInt::from_usize(0).unwrap();
-    let m: BigInt = BigInt::from_u64(2u64.pow(60)).unwrap();
-    let bn1: Vec<BigInt> = v1.iter().map(|x| x.to_bigint().unwrap()).collect();
-    let bn2: Vec<BigInt> = v2.iter().map(|x| x.to_bigint().unwrap()).collect();
+pub fn NH(v1: &[u32], v2: &[u32]) -> u64 {
+    let mut sum: Wrapping<u64> = Wrapping(0);
 
-    for i in 1..std::cmp::min(bn1.len(), bn2.len()) / 4 {
-        sum = sum +
-              (((&bn1[4 * i - 3] + &bn2[4 * i - 3]) * (&bn1[4 * i - 1] + &bn2[4 * i - 1]) +
-                (&bn1[4 * i - 2] + &bn2[4 * i - 2]) * (&bn1[4 * i] + &bn2[4 * i])) %
-               &m);
+    for i in 1..std::cmp::min(v1.len(), v2.len()) / 4 {
+        // XXX cmr: RIP debug perf.
+        let va = Wrapping(v1[4 * i - 3]);
+        let vb = Wrapping(v2[4 * i - 3]);
+        let vc = Wrapping(v1[4 * i - 2]);
+        let vd = Wrapping(v2[4 * i - 2]);
+        let ve = Wrapping(v1[4 * i - 1]);
+        let vf = Wrapping(v2[4 * i - 1]);
+        let vg = Wrapping(v1[4 * i]);
+        let vh = Wrapping(v2[4 * i]);
+        sum += (Wrapping((va + vb).0 as u64) * Wrapping((ve + vf).0 as u64)) + (Wrapping((vc + vd).0 as u64) * Wrapping((vg + vh).0 as u64));
     }
-    sum
+    sum.0
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -745,7 +758,7 @@ fn pad(multiple: usize, input: &[u8]) -> Vec<u8> {
 /// let s3: Vec<u8> = toStr(4, &4294967295);
 /// assert!(vec![255, 255, 255, 255] == s3);
 /// ```
-pub fn toStr<'a>(n: isize, x: &'a usize) -> Vec<u8> {
+pub fn toStr(n: isize, x: usize) -> Vec<u8> {
     let binary: String = format!("{:b}", x.to_le());
     let len: isize = n * 8isize - binary.len() as isize;
     let bits = (0..binary.len()).map(|i| binary.chars().nth(i).unwrap() == '1');
@@ -852,7 +865,11 @@ fn take32<'a>(x: &'a [u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use hs1::*;
+    use std;
+    use quickcheck::TestResult;
     use std::iter::repeat;
+    use num::bigint::{BigInt, ToBigInt};
+    use num::traits::{FromPrimitive, ToPrimitive};
 
     static KEY_32_BYTES: [u8; 32] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10,
                                      0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x20,
@@ -872,32 +889,32 @@ mod tests {
     #[test]
     fn test_hs1_toStr_toInts4_3() {
         let orig: usize = 3;
-        assert_eq!(toInts4(&toStr(4, &orig)).unwrap()[0], orig as u32);
+        assert_eq!(toInts4(&toStr(4, orig)).unwrap()[0], orig as u32);
     }
     #[test]
     fn test_hs1_toStr_toInts4_256() {
         let orig: usize = 256;
-        assert_eq!(toInts4(&toStr(4, &orig)).unwrap()[0], orig as u32);
+        assert_eq!(toInts4(&toStr(4, orig)).unwrap()[0], orig as u32);
     }
     #[test]
     fn test_hs1_toStr_toInts4_4294967295() {
         let orig: usize = 4294967295;
-        assert_eq!(toInts4(&toStr(4, &orig)).unwrap()[0], orig as u32);
+        assert_eq!(toInts4(&toStr(4, orig)).unwrap()[0], orig as u32);
     }
     #[test]
     fn test_hs1_toStr_toInts8_3() {
         let orig: usize = 3;
-        assert_eq!(toInts8(&toStr(8, &orig)).unwrap()[0], orig as u64);
+        assert_eq!(toInts8(&toStr(8, orig)).unwrap()[0], orig as u64);
     }
     #[test]
     fn test_hs1_toStr_toInts8_256() {
         let orig: usize = 256;
-        assert_eq!(toInts8(&toStr(8, &orig)).unwrap()[0], orig as u64);
+        assert_eq!(toInts8(&toStr(8, orig)).unwrap()[0], orig as u64);
     }
     #[test]
     fn test_hs1_toStr_toInts8_18446744073709551615() {
         let orig: usize = 18446744073709551615;
-        assert_eq!(toInts8(&toStr(8, &orig)).unwrap()[0], orig as u64);
+        assert_eq!(toInts8(&toStr(8, orig)).unwrap()[0], orig as u64);
     }
 
     #[test]
@@ -1062,5 +1079,29 @@ mod tests {
         let d: Result<Plaintext, Error> =
             hs1.decrypt(&KEY_32_BYTES[..], &a, &e, &associated_data(), &nonce());
         assert_eq!(&d.unwrap()[..], &msg()[..]);
+    }
+
+    fn old_nh(v1: &[u32], v2: &[u32]) -> u64 {
+        let mut sum: BigInt = BigInt::from_usize(0).unwrap();
+        let m: BigInt = BigInt::from_u64(2u64.pow(60)).unwrap();
+        let bn1: Vec<BigInt> = v1.iter().map(|x| x.to_bigint().unwrap()).collect();
+        let bn2: Vec<BigInt> = v2.iter().map(|x| x.to_bigint().unwrap()).collect();
+
+        for i in 1..std::cmp::min(bn1.len(), bn2.len()) / 4 {
+            sum = sum +
+                (((&bn1[4 * i - 3] + &bn2[4 * i - 3]) * (&bn1[4 * i - 1] + &bn2[4 * i - 1]) +
+                  (&bn1[4 * i - 2] + &bn2[4 * i - 2]) * (&bn1[4 * i] + &bn2[4 * i])) %
+                 &m);
+        }
+        sum.to_u64().unwrap()
+    }
+
+    quickcheck! {
+        fn nh_optzn_is_correct(v1: Vec<u32>, v2: Vec<u32>) -> TestResult {
+            if v1.len() != v2.len() || std::cmp::min(v1.len(), v2.len()) % 4 != 0 {
+                return TestResult::discard();
+            }
+            return TestResult::from_bool(super::NH(&v1, &v2) == old_nh(&v1, &v2));
+        }
     }
 }

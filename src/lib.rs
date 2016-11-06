@@ -14,10 +14,14 @@ extern crate rand;
 extern crate rustc_serialize as serialize;
 extern crate time;
 extern crate libc;
-extern crate num;
 
 #[cfg(all(test, feature = "with-bench"))]
 extern crate test;
+#[cfg(test)]
+#[macro_use]
+extern crate quickcheck;
+#[cfg(test)]
+extern crate num;
 
 pub mod aead;
 pub mod aes;

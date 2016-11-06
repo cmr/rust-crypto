@@ -24,5 +24,9 @@ libc = "^0.2"
 time = "^0.1"
 rand = "^0.3"
 rustc-serialize = "^0.3"
-num = "*"
 bit-vec = "^0.4"
+extprim = "^1.1"
+
+[dev-dependencies]
+num = "*"
+quickcheck = "*"
